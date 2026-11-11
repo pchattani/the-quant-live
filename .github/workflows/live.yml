@@ -71,7 +71,7 @@ jobs:
             const { execFileSync } = require('child_process');
             const fs = require('fs');
             const path = require('path');
-            const MODELS = process.env.MODELS === 'success';
+            const MODELS = process.env.MODELS === 'success' && fs.existsSync('qs/scripts/live_chances.py');
             const { DefaultArtifactClient } = require('@actions/artifact');
             const artifact = new DefaultArtifactClient();
             const { owner, repo } = context.repo;
@@ -89,7 +89,9 @@ jobs:
               const up = await artifact.uploadArtifact(`github-pages-${n}`, ['artifact.tar'], '.', { retentionDays: 1 });
               const oidc = await core.getIDToken();
               const dep = (await github.request('POST /repos/{owner}/{repo}/pages/deployments', {
-                owner, repo, artifact_id: Number(up.id), pages_build_version: `live-${context.runId}-${n}`,
+                // the version must be the commit id (anything else answers 404; probed 11 Nov 2026); deploying the
+                // same commit again replaces the content, in about three seconds
+                owner, repo, artifact_id: Number(up.id), pages_build_version: context.sha,
                 oidc_token: oidc })).data;
               const t0 = Date.now();
               let status = '';

@@ -116,6 +116,7 @@ jobs:
                 r = JSON.parse(out.trim().split('\n').pop());
               } catch (e) { core.info(`tick failed: ${String(e.message).slice(0, 200)}`); }
               if (r.changed) pending = true;
+              const tickS = Math.round((Date.now() - t0) / 1000);
               // the sites' own live models, on the games in progress (never stops the feed)
               if (MODELS && r.live > 0) {
                 try {
@@ -126,6 +127,8 @@ jobs:
                   r.chances = c.n;
                 } catch (e) { core.info(`chances failed: ${String(e.message).slice(0, 200)}`); }
               }
+              const stepS = Math.round((Date.now() - t0) / 1000);
+              if (stepS > 20) core.info(`${new Date().toISOString()} slow tick: boards ${tickS}s, chances ${stepS - tickS}s`);
               if (pending || Date.now() - lastDeploy > HEARTBEAT) {
                 try {
                   const s = await deploy();

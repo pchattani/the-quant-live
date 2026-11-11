@@ -1,0 +1,152 @@
+# The live-score feed of The Quant Sports (https://pchattani.github.io/the-quant-live/live.json).
+# Source of truth: the engine's live_repo/ and scripts/live_feed.py, pushed here by scripts/setup_live_repo.py.
+#
+# One long job: every 30 to 60 seconds it reads the scoreboards that are due (live_feed.py decides which), and when a
+# score, clock or status changed it deploys the one small file to GitHub Pages (about 20 seconds). With nothing on it
+# deploys a heartbeat every five minutes, so readers can tell a quiet feed from a dead one. The job runs for five and a
+# half hours (or until a newer copy of these files is pushed), then starts its successor; watchdog.yml restarts the
+# chain if it ever breaks.
+#
+# Live win chances come from the sites' own live models: the job also checks out the public build repo
+# (pchattani/quant-sports) and, after a tick with a game on, runs its scripts/live_chances.py, which adds the chance
+# to the entries it can compute. If that checkout or its dependencies fail, the feed runs without chances. Nothing here can fail a
+# run: a board that does not answer or a deploy that does not finish is logged and tried again at the next tick.
+name: Live scores
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  actions: write
+
+concurrency:
+  group: live
+  cancel-in-progress: false
+
+jobs:
+  feed:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    environment:
+      name: github-pages
+    steps:
+      - uses: actions/checkout@v4
+      - name: The build repo (the sites' own live models)
+        id: qs
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: pchattani/quant-sports
+          path: qs
+      - name: uv and Python for the live models
+        id: uv
+        continue-on-error: true
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.11'
+          enable-cache: false
+      - name: Dependencies for the live models
+        id: deps
+        if: steps.qs.outcome == 'success' && steps.uv.outcome == 'success'
+        continue-on-error: true
+        working-directory: qs
+        run: |
+          for i in 1 2 3; do
+            uv sync --frozen && exit 0
+            sleep 30
+          done
+          exit 1
+      - name: Artifact client
+        run: npm install --no-save --silent @actions/artifact@2
+      - name: Feed loop
+        uses: actions/github-script@v7
+        env:
+          MINUTES: '330'
+          MODELS: ${{ steps.deps.outcome }}
+        with:
+          script: |
+            const { execFileSync } = require('child_process');
+            const fs = require('fs');
+            const path = require('path');
+            const MODELS = process.env.MODELS === 'success';
+            const { DefaultArtifactClient } = require('@actions/artifact');
+            const artifact = new DefaultArtifactClient();
+            const { owner, repo } = context.repo;
+            const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+            const END = Date.now() + Number(process.env.MINUTES) * 60000;
+            const HEARTBEAT = 5 * 60000;
+            fs.mkdirSync('site', { recursive: true });
+            fs.copyFileSync('index.html', 'site/index.html');
+            let n = 0, lastDeploy = 0, pending = false, deploys = 0, failures = 0, lastCheck = Date.now();
+
+            async function deploy() {
+              n += 1;
+              execFileSync('tar', ['-cf', 'artifact.tar', '-C', 'site', '.']);
+              const up = await artifact.uploadArtifact(`github-pages-${n}`, ['artifact.tar'], '.', { retentionDays: 1 });
+              const oidc = await core.getIDToken();
+              const dep = (await github.request('POST /repos/{owner}/{repo}/pages/deployments', {
+                owner, repo, artifact_id: Number(up.id), pages_build_version: `live-${context.runId}-${n}`,
+                oidc_token: oidc })).data;
+              const t0 = Date.now();
+              let status = '';
+              while (Date.now() - t0 < 90000) {
+                await sleep(2500);
+                try {
+                  status = (await github.request('GET /repos/{owner}/{repo}/pages/deployments/{id}',
+                    { owner, repo, id: dep.id })).data.status || '';
+                } catch (e) { continue; }
+                if (status === 'succeed') return Math.round((Date.now() - t0) / 1000);
+                if (/failed|cancelled|lost|error/.test(status)) throw new Error('Pages reported ' + status);
+              }
+              throw new Error('still ' + (status || 'processing') + ' after 90 s (left to finish)');
+            }
+
+            while (Date.now() < END) {
+              const t0 = Date.now();
+              let r = { changed: false, next: 30, live: 0 };
+              try {
+                const out = execFileSync('python3', ['live_feed.py', '--out', 'site/live.json', '--state', 'state.json'],
+                  { encoding: 'utf8', timeout: 240000 });
+                r = JSON.parse(out.trim().split('\n').pop());
+              } catch (e) { core.info(`tick failed: ${String(e.message).slice(0, 200)}`); }
+              if (r.changed) pending = true;
+              // the sites' own live models, on the games in progress (never stops the feed)
+              if (MODELS && r.live > 0) {
+                try {
+                  const out = execFileSync('uv', ['run', '--frozen', 'python', 'scripts/live_chances.py', '--feed', path.resolve('site/live.json'),
+                    '--state', path.resolve('state.json')], { cwd: 'qs', encoding: 'utf8', timeout: 120000 });
+                  const c = JSON.parse(out.trim().split('\n').pop());
+                  if (c.changed) pending = true;
+                  r.chances = c.n;
+                } catch (e) { core.info(`chances failed: ${String(e.message).slice(0, 200)}`); }
+              }
+              if (pending || Date.now() - lastDeploy > HEARTBEAT) {
+                try {
+                  const s = await deploy();
+                  deploys += 1; pending = false; lastDeploy = Date.now();
+                  core.info(`${new Date().toISOString()} deployed #${n} in ${s}s (live ${r.live}, games ${r.games}, chances ${r.chances || 0}` +
+                    (r.failing && r.failing.length ? `, not answering: ${r.failing.join(' ')}` : '') + ')');
+                } catch (e) {
+                  failures += 1;
+                  core.info(`${new Date().toISOString()} deploy #${n} not confirmed: ${String(e.message).slice(0, 200)}`);
+                  if (e.status === 403 || e.status === 429) await sleep(60000);
+                }
+              }
+              // a newer copy of these files was pushed: end here, the successor runs the new ones
+              if (Date.now() - lastCheck > 3 * 60000) {
+                lastCheck = Date.now();
+                try {
+                  const head = (await github.rest.repos.getBranch({ owner, repo, branch: 'main' })).data.commit.sha;
+                  if (head !== context.sha) { core.info(`main moved to ${head.slice(0, 8)}: handing over`); break; }
+                } catch (e) { /* tried again in three minutes */ }
+              }
+              const wait = Math.max(10, Math.min(60, Number(r.next) || 30)) * 1000 - (Date.now() - t0);
+              if (wait > 0) await sleep(wait);
+            }
+            core.info(`Done: ${deploys} deploys, ${failures} not confirmed. Starting the successor.`);
+            try {
+              await github.rest.actions.createWorkflowDispatch({ owner, repo, workflow_id: 'live.yml', ref: 'main' });
+            } catch (e) { core.info(`successor not started (${e.status}); the watchdog will`); }

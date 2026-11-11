@@ -9,6 +9,10 @@ while games are on, so a score is the same on every page and does not wait for a
   User-Agent, each board only as often as it needs: every 30 seconds with a game on, every 30 minutes with nothing
   near.
 - `.github/workflows/live.yml` runs it in a loop and deploys the file to GitHub Pages when something changed.
+- Live win chances come from the sites' own live models: the loop also checks out the public build repo
+  ([pchattani/quant-sports](https://github.com/pchattani/quant-sports)) and runs its `scripts/live_chances.py` on the
+  games in progress (the Hardwood's NBA and WNBA model first), with the model numbers the site's last build
+  published.
 - `.github/workflows/watchdog.yml` restarts the loop if it stops.
 
 The files here are copies: the source is the private engine repository (`scripts/live_feed.py`, `live_repo/`).

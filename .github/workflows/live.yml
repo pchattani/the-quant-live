@@ -83,8 +83,11 @@ jobs:
             try { fs.copyFileSync('index.html', 'site/index.html'); } catch (e) { fs.writeFileSync('site/index.html', '<!doctype html><title>Live scores feed</title><a href="live.json">live.json</a>'); }
             let n = 0, lastDeploy = 0, pending = false, deploys = 0, failures = 0, lastCheck = Date.now();
 
+            const SERVED = `https://${owner}.github.io/${repo}/live.json`;
             async function deploy() {
               n += 1;
+              let want = 0;
+              try { want = Number(JSON.parse(fs.readFileSync('site/live.json', 'utf8')).at) || 0; } catch (e) { /* no file yet */ }
               execFileSync('tar', ['-cf', 'artifact.tar', '-C', 'site', '.']);
               const up = await artifact.uploadArtifact(`github-pages-${n}`, ['artifact.tar'], '.', { retentionDays: 1 });
               const oidc = await core.getIDToken();
@@ -94,17 +97,27 @@ jobs:
                 owner, repo, artifact_id: Number(up.id), pages_build_version: context.sha,
                 oidc_token: oidc })).data;
               const t0 = Date.now();
-              let status = '';
-              while (Date.now() - t0 < 90000) {
+              let status = '', seen = 0;
+              // The proof of a deploy is the served file. The deployment's own status is not: on 11 Nov 2026 it read
+              // 'succeed' within 3 s for nineteen deployments in a row that Pages never served (cause not established;
+              // the likeliest is that a deployment still being published is dropped when the next one for the same
+              // commit arrives). So the next deploy waits for this one to be served.
+              while (Date.now() - t0 < 120000) {
                 await sleep(2500);
+                try {
+                  const res = await fetch(`${SERVED}?d=${Date.now()}`, { cache: 'no-store' });
+                  if (res.ok) {
+                    seen = Number((await res.json()).at) || 0;
+                    if (seen >= want) return Math.round((Date.now() - t0) / 1000);
+                  }
+                } catch (e) { /* read again */ }
                 try {
                   status = (await github.request('GET /repos/{owner}/{repo}/pages/deployments/{id}',
                     { owner, repo, id: dep.id })).data.status || '';
                 } catch (e) { continue; }
-                if (status === 'succeed') return Math.round((Date.now() - t0) / 1000);
                 if (/failed|cancelled|lost|error/.test(status)) throw new Error('Pages reported ' + status);
               }
-              throw new Error('still ' + (status || 'processing') + ' after 90 s (left to finish)');
+              throw new Error(`not served after 120 s (status ${status || 'unknown'}, the served file is ${want - seen} s behind)`);
             }
 
             while (Date.now() < END) {
@@ -133,7 +146,7 @@ jobs:
                 try {
                   const s = await deploy();
                   deploys += 1; pending = false; lastDeploy = Date.now();
-                  core.info(`${new Date().toISOString()} deployed #${n} in ${s}s (live ${r.live}, games ${r.games}, chances ${r.chances || 0}` +
+                  core.info(`${new Date().toISOString()} served #${n} in ${s}s (live ${r.live}, games ${r.games}, chances ${r.chances || 0}` +
                     (r.failing && r.failing.length ? `, not answering: ${r.failing.join(' ')}` : '') + ')');
                 } catch (e) {
                   failures += 1;

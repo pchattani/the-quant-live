@@ -79,7 +79,8 @@ jobs:
             const END = Date.now() + Number(process.env.MINUTES) * 60000;
             const HEARTBEAT = 5 * 60000;
             fs.mkdirSync('site', { recursive: true });
-            fs.copyFileSync('index.html', 'site/index.html');
+            // (a run started from a commit older than index.html must not fail: 11 Nov 2026, the very first run)
+            try { fs.copyFileSync('index.html', 'site/index.html'); } catch (e) { fs.writeFileSync('site/index.html', '<!doctype html><title>Live scores feed</title><a href="live.json">live.json</a>'); }
             let n = 0, lastDeploy = 0, pending = false, deploys = 0, failures = 0, lastCheck = Date.now();
 
             async function deploy() {

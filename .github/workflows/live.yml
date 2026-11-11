@@ -132,8 +132,10 @@ jobs:
                     (r.failing && r.failing.length ? `, not answering: ${r.failing.join(' ')}` : '') + ')');
                 } catch (e) {
                   failures += 1;
-                  core.info(`${new Date().toISOString()} deploy #${n} not confirmed: ${String(e.message).slice(0, 200)}`);
-                  if (e.status === 403 || e.status === 429) await sleep(60000);
+                  const body = e.response && e.response.data ? JSON.stringify(e.response.data).slice(0, 400) : '';
+                  core.info(`${new Date().toISOString()} deploy #${n} not confirmed: ${e.status || ''} ${String(e.message).slice(0, 200)} ${body}`);
+                  // a deploy that is refused is not retried at once (each try uploads an artifact)
+                  if (e.status) await sleep(e.status === 403 || e.status === 429 ? 120000 : 45000);
                 }
               }
               // a newer copy of these files was pushed: end here, the successor runs the new ones

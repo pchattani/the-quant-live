@@ -82,6 +82,12 @@ jobs:
             // (a run started from a commit older than index.html must not fail: 11 Nov 2026, the very first run)
             try { fs.copyFileSync('index.html', 'site/index.html'); } catch (e) { fs.writeFileSync('site/index.html', '<!doctype html><title>Live scores feed</title><a href="live.json">live.json</a>'); }
             let n = 0, lastDeploy = 0, pending = false, deploys = 0, failures = 0, lastCheck = Date.now();
+            // Pacing. Pages serves a burst of deploys in about 3 s each, then (12 Nov 2026: after eleven at two a
+            // minute) takes 20 to 60 s or never serves one, and its copies fall minutes behind. So a slow or unserved
+            // deploy doubles the least gap before the next one, and five quick ones in a row halve it again.
+            let gap = 0, quick = 0, lastSent = 0;
+            function slower() { gap = Math.min(300, Math.max(60, gap * 2)); quick = 0; }
+            function quicker() { quick += 1; if (quick >= 5 && gap) { gap = gap > 60 ? Math.round(gap / 2) : 0; quick = 0; } }
 
             const SERVED = `https://${owner}.github.io/${repo}/live.json`;
             const hist = [];                                   // the last deploys: sent when, served after how long
@@ -95,7 +101,7 @@ jobs:
               let want = 0;
               try { want = Number(JSON.parse(fs.readFileSync('site/live.json', 'utf8')).at) || 0; } catch (e) { /* no file yet */ }
               fs.writeFileSync('site/loop.json', JSON.stringify({ run: context.runId, sha: context.sha.slice(0, 8), started,
-                deploys, failures, last: hist }));
+                deploys, failures, gap, last: hist }));
               execFileSync('tar', ['-cf', 'artifact.tar', '-C', 'site', '.']);
               const up = await artifact.uploadArtifact(`github-pages-${n}`, ['artifact.tar'], '.', { retentionDays: 1 });
               const oidc = await core.getIDToken();
@@ -152,14 +158,16 @@ jobs:
               }
               const stepS = Math.round((Date.now() - t0) / 1000);
               if (stepS > 20) core.info(`${new Date().toISOString()} slow tick: boards ${tickS}s, chances ${stepS - tickS}s`);
-              if (pending || Date.now() - lastDeploy > HEARTBEAT) {
+              if ((pending || Date.now() - lastDeploy > HEARTBEAT) && Date.now() - lastSent >= gap * 1000) {
+                lastSent = Date.now();
                 try {
                   const s = await deploy();
                   deploys += 1; pending = false; lastDeploy = Date.now();
-                  core.info(`${new Date().toISOString()} served #${n} in ${s}s (live ${r.live}, games ${r.games}, chances ${r.chances || 0}` +
+                  if (s > 10) slower(); else quicker();
+                  core.info(`${new Date().toISOString()} served #${n} in ${s}s (gap ${gap}s, live ${r.live}, games ${r.games}, chances ${r.chances || 0}` +
                     (r.failing && r.failing.length ? `, not answering: ${r.failing.join(' ')}` : '') + ')');
                 } catch (e) {
-                  failures += 1;
+                  failures += 1; slower();
                   const body = e.response && e.response.data ? JSON.stringify(e.response.data).slice(0, 400) : '';
                   core.info(`${new Date().toISOString()} deploy #${n} not confirmed: ${e.status || ''} ${String(e.message).slice(0, 200)} ${body}`);
                   // a deploy that is refused is not retried at once (each try uploads an artifact)

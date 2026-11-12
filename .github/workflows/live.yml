@@ -85,7 +85,7 @@ jobs:
             // Pacing. Pages serves a burst of deploys in about 3 s each, then (12 Nov 2026: after eleven at two a
             // minute) takes 20 to 60 s or never serves one, and its copies fall minutes behind. So a slow or unserved
             // deploy doubles the least gap before the next one, and five quick ones in a row halve it again.
-            let gap = 0, quick = 0, lastSent = 0;
+            let gap = 0, quick = 0, lastSent = 0, lastPull = Date.now();
             function slower() { gap = Math.min(300, Math.max(60, gap * 2)); quick = 0; }
             function quicker() { quick += 1; if (quick >= 5 && gap) { gap = gap > 60 ? Math.round(gap / 2) : 0; quick = 0; } }
 
@@ -146,6 +146,14 @@ jobs:
               } catch (e) { core.info(`tick failed: ${String(e.message).slice(0, 200)}`); }
               if (r.changed) pending = true;
               const tickS = Math.round((Date.now() - t0) / 1000);
+              // the build repo's newest code for the live models, every ten minutes (the hourly export changes it)
+              if (MODELS && Date.now() - lastPull > 10 * 60000) {
+                lastPull = Date.now();
+                try {
+                  execFileSync('git', ['-C', 'qs', 'fetch', '--quiet', '--depth', '1', 'origin', 'main'], { timeout: 60000 });
+                  execFileSync('git', ['-C', 'qs', 'reset', '--quiet', '--hard', 'FETCH_HEAD'], { timeout: 60000 });
+                } catch (e) { core.info(`build repo not refreshed: ${String(e.message).slice(0, 160)}`); }
+              }
               // the sites' own live models, on the games in progress (never stops the feed)
               if (MODELS && r.live > 0) {
                 try {

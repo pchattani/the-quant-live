@@ -84,10 +84,18 @@ jobs:
             let n = 0, lastDeploy = 0, pending = false, deploys = 0, failures = 0, lastCheck = Date.now();
 
             const SERVED = `https://${owner}.github.io/${repo}/live.json`;
+            const hist = [];                                   // the last deploys: sent when, served after how long
+            const started = Math.floor(Date.now() / 1000);
+            function record(rec) {
+              hist.push(rec);
+              if (hist.length > 60) hist.shift();
+            }
             async function deploy() {
               n += 1;
               let want = 0;
               try { want = Number(JSON.parse(fs.readFileSync('site/live.json', 'utf8')).at) || 0; } catch (e) { /* no file yet */ }
+              fs.writeFileSync('site/loop.json', JSON.stringify({ run: context.runId, sha: context.sha.slice(0, 8), started,
+                deploys, failures, last: hist }));
               execFileSync('tar', ['-cf', 'artifact.tar', '-C', 'site', '.']);
               const up = await artifact.uploadArtifact(`github-pages-${n}`, ['artifact.tar'], '.', { retentionDays: 1 });
               const oidc = await core.getIDToken();
@@ -97,6 +105,8 @@ jobs:
                 owner, repo, artifact_id: Number(up.id), pages_build_version: context.sha,
                 oidc_token: oidc })).data;
               const t0 = Date.now();
+              const rec = { n, at: want, sent: Math.floor(t0 / 1000), served: null };
+              record(rec);
               let status = '', seen = 0;
               // The proof of a deploy is the served file. The deployment's own status is not: on 11 Nov 2026 it read
               // 'succeed' within 3 s for nineteen deployments in a row that Pages never served (cause not established;
@@ -108,7 +118,7 @@ jobs:
                   const res = await fetch(`${SERVED}?d=${Date.now()}`, { cache: 'no-store' });
                   if (res.ok) {
                     seen = Number((await res.json()).at) || 0;
-                    if (seen >= want) return Math.round((Date.now() - t0) / 1000);
+                    if (seen >= want) { rec.served = Math.round((Date.now() - t0) / 1000); return rec.served; }
                   }
                 } catch (e) { /* read again */ }
                 try {

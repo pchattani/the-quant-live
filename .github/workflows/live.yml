@@ -64,7 +64,7 @@ jobs:
       - name: Feed loop
         uses: actions/github-script@v7
         env:
-          MINUTES: '330'
+          MINUTES: '6'
           MODELS: ${{ steps.deps.outcome }}
         with:
           script: |
